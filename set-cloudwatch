@@ -1,0 +1,163 @@
+#!/bin/bash
+
+### BEGIN INIT INFO
+# Provides:          set-cloudwatch
+# Required-Start:    $syslog
+# Required-Stop:     $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Run the script
+# Description:       creates, suspends and terminates cloudwatch alarms, depending on arguement provided
+### END INIT INFO
+
+# Installation:
+# Copy this script to /etc/init.d and run sudo update-rc.d set-cloudwatch defaults
+
+USAGE="Usage: set-cloudwatch start (create alarms)|suspend (silence alarms)|terminate (delete alarms)|status (configured alarms)| stop (hammer time)"
+
+if [ $# == 0 ] ; then
+    echo $USAGE
+    exit 1;
+fi
+
+# Setting up the variables
+logger -t cloudwatch-setup Cloudwatch alarm and notification setup starting...
+JAVA_PATH=`readlink /etc/alternatives/java`
+JAVA_DIR=`dirname "$JAVA_PATH"`
+export JAVA_HOME=`realpath "$JAVA_DIR/../../"`
+instance=`wget -q -O - http://169.254.169.254/latest/meta-data/instance-id`
+region=`wget -q -O - http://169.254.169.254/latest/meta-data/placement/availability-zone|sed s'/.$//'`
+platform=`/usr/local/bin/aws --region $region ec2 describe-tags --filters "Name=resource-id,Values=$instance" "Name=key,Values=environment"|grep Value|awk '{print $2}'|sed -e 's/,//g'|sed -e 's/"//g'`
+name=`/usr/local/bin/aws --region $region ec2 describe-tags --filters "Name=resource-id,Values=$instance" "Name=key,Values=Name"|grep Value|awk '{print $2}'|sed -e 's/,//g'|sed -e 's/"//g'`
+current_alarms=`/usr/local/bin/aws --region $region cloudwatch describe-alarms|grep $name|grep AlarmName|sed -e 's/,//g'|sed -e 's/"//g'`
+metrics=3
+published=`/home/blabcake/aws/aws-scripts-mon/mon-get-instance-stats.pl|grep %|awk '{print $2}'|wc -l`
+timeout=420
+count=0
+
+# Making sure that this instance is Stage or Prod, if not, exit with a message.
+
+if [ "$platform" = "Prod" ]; then
+	notify="arn:aws:sns:us-east-1:105865408629:IAD-Prod-Cloudwatch"
+elif [ "$platform" = "Stage" ]; then
+	notify="arn:aws:sns:us-east-1:105865408629:IAD-Stage-Cloudwatch"
+else
+	logger -t cloudwatch-setup  Not a Stage or Prod enviroment, exiting
+	exit 1
+fi
+
+# Setup the various Cloudwatch alarms
+case $1 in
+	start)
+		#Removing the mon-put-instance.pl temp file to make sure we get the correct instand ID
+		rm -f /var/tmp/aws-mon/instance-id
+
+		#Running the mon-put-instance.pl script to get datapoints into Clowdwatch.
+		echo -e "Pushing initial disk and memory metrics to cloudwatch...\n"
+		/home/blabcake/aws/aws-scripts-mon/mon-put-instance-data.pl --mem-util --disk-space-util --disk-path=/ --aws-credential-file=/home/blabcake/.aws/awscreds
+		
+		#checking to see if the metrics have been pushed and that they're published
+		
+		while [[ "$count" -lt "$timeout" ]] 
+		do 
+			logger -t cloudwatch-setup Waiting for metrics to publish...
+			echo -e "Waiting for metrics to be published in cloudwatch. "
+			logger -t cloudwatch-setup Waiting for metrics to be published in cloudwatch...
+			sleep 10s
+			published=`/home/blabcake/aws/aws-scripts-mon/mon-get-instance-stats.pl|grep %|awk '{print $2}'|wc -l`
+			if [ $published -eq $metrics ]
+				then
+					echo "Cloudwatch reports $metrics of $published metrics, continuing with script..."
+					logger -t cloudwatch-setup Cloudwatch reports $metrics of $published metrics, continuing with script...
+					break
+				else
+					logger -t cloudwatch-setup "Cloudwatch reports $published of $metrics metrics, waiting for 3 of 3 metrics.."
+					echo "Cloudwatch reports $published of $metrics metrics, waiting for 3 of 3 metrics.."
+					/home/blabcake/aws/aws-scripts-mon/mon-put-instance-data.pl --mem-util --disk-space-util --disk-path=/ --aws-credential-file=/home/blabcake/.aws/awscreds
+			fi
+			#increase the counter variable, count, by 1
+			count=$((count+10))
+		done
+
+			if [ $count -gt $timeout ]
+				then
+				echo "Cloudwatch-setup timeout exceeded. Exiting..."
+				echo "The cloudwatch setup timeout exceeded, exiting the script with no alerts created."
+				logger -t cloudwatch-setup Cloudwatch-setup timeout exceeded, exiting the script with no alerts created.
+				exit 1
+			fi
+
+
+		
+		
+		# Creating the various alarms in Cloudwatch, but not enabling alarm actions. We'll set the initial state to OK to start.
+		echo -e "Creating CPU, Disk and Memory alarms in $region...\n"
+		logger -t cloudwatch-setup Starting CPU, Disk and Memory alarm creation in $region...
+		logger -t cloudwatch-setup creating $name CPU 85%. Notifications are being sent to $notify
+		echo "Creating $name CPU 85%. Notifications are being sent to $notify"
+		/usr/local/bin/aws --region $region cloudwatch put-metric-alarm --alarm-name "$name CPU 85%" --alarm-description "$name CPU 85%" --metric-name CPUUtilization --namespace AWS/EC2 --statistic Average --period 300 --threshold 85 --comparison-operator GreaterThanThreshold --dimensions Name=InstanceId,Value=$instance --evaluation-periods 2 --no-actions-enabled --ok-actions $notify --alarm-actions $notify --unit Percent --insufficient-data-actions $notify
+		/usr/local/bin/aws --region $region cloudwatch set-alarm-state --alarm-name "$name CPU 85%" --state-value OK --state-reason "Inital alarm creation" 
+		 logger -t cloudwatch-setup CPU 85% Alarm and notification created.
+
+		 logger -t cloudwatch-setup Creating $name CPU 95%. Notifications are being sent to $notify
+		 echo "Creating $name CPU 95%. Notifications are being sent to $notify"
+		 /usr/local/bin/aws --region $region cloudwatch put-metric-alarm --alarm-name "$name CPU 95%" --alarm-description "$name CPU 95%" --metric-name CPUUtilization --namespace AWS/EC2 --statistic Average --period 300 --threshold 95 --comparison-operator GreaterThanThreshold --dimensions Name=InstanceId,Value=$instance --evaluation-periods 2 --no-actions-enabled --ok-actions $notify --alarm-actions $notify --unit Percent --insufficient-data-actions $notify
+		 /usr/local/bin/aws --region $region cloudwatch set-alarm-state --alarm-name "$name CPU 95%" --state-value OK --state-reason "Inital alarm creation"
+		 logger -t cloudwatch-setup CPU 95% Alarm and notification created.
+		 
+		 logger -t cloudwatch-setup Creating $name Memory 90%. Notifications are being sent to $notify
+		 echo "Creating $name Memory 90%. Notifications are being sent to $notify"
+		 /usr/local/bin/aws --region $region cloudwatch put-metric-alarm --alarm-name "$name Memory 90%" --alarm-description "$name Memory 90%" --metric-name MemoryUtilization --namespace System/Linux --statistic Average --period 300 --threshold 90 --comparison-operator GreaterThanThreshold --dimensions Name=InstanceId,Value=$instance --evaluation-periods 2 --no-actions-enabled --ok-actions $notify --alarm-actions $notify --unit Percent --insufficient-data-actions $notify
+		 /usr/local/bin/aws --region $region cloudwatch set-alarm-state --alarm-name "$name Memory 90%" --state-value OK --state-reason "Inital alarm creation"
+		 logger -t cloudwatch-setup Memory 90% Alarm and notification created.
+		 
+		 logger -t cloudwatch-setup Creating $name Memory 95%. Notifications are being sent to $notify
+		 echo "Creating $name Memory 95%. Notifications are being sent to $notify"
+		 /usr/local/bin/aws --region $region cloudwatch put-metric-alarm --alarm-name "$name Memory 95%" --alarm-description "$name Memory 95%" --metric-name MemoryUtilization --namespace System/Linux --statistic Average --period 300 --threshold 95 --comparison-operator GreaterThanThreshold --dimensions Name=InstanceId,Value=$instance --evaluation-periods 2 --no-actions-enabled --ok-actions $notify --alarm-actions $notify --unit Percent --insufficient-data-actions $notify
+		 /usr/local/bin/aws --region $region cloudwatch set-alarm-state --alarm-name "$name Memory 95%" --state-value OK --state-reason "Inital alarm creation"
+		 logger -t cloudwatch-setup Memory 95% Alarm and notification created.
+		 
+		 logger -t cloudwatch-setup Creating $name Disk 80%. Notifications are being sent to $notify
+		 echo "Creating $name Disk 80%. Notifications are being sent to $notify"
+		 /usr/local/bin/aws --region $region cloudwatch put-metric-alarm --alarm-name "$name Disk 80%" --alarm-description "$name Disk 80%" --metric-name DiskSpaceUtilization --namespace System/Linux --statistic Average --period 600 --threshold 80 --comparison-operator GreaterThanThreshold --dimensions Name=Filesystem,Value=/dev/xvda1 Name=MountPath,Value=/ Name=InstanceId,Value=$instance --evaluation-periods 2 --no-actions-enabled --ok-actions $notify --alarm-actions $notify --unit Percent --insufficient-data-actions $notify
+		 /usr/local/bin/aws --region $region cloudwatch set-alarm-state --alarm-name "$name Disk 80%" --state-value OK --state-reason "Inital alarm creation"
+		 logger -t cloudwatch-setup Disk 80% Alarm and notification created.
+		 
+		 logger -t cloudwatch-setup Creating $name Disk 95%. Notifications are being sent to $notify
+		 echo "Creating $name Disk 95%. Notifications are being sent to $notify"
+		 /usr/local/bin/aws --region $region cloudwatch put-metric-alarm --alarm-name "$name Disk 95%" --alarm-description "$name Disk 95%" --metric-name DiskSpaceUtilization --namespace System/Linux --statistic Average --period 600 --threshold 95 --comparison-operator GreaterThanThreshold --dimensions Name=Filesystem,Value=/dev/xvda1 Name=MountPath,Value=/ Name=InstanceId,Value=$instance  --evaluation-periods 2 --no-actions-enabled --ok-actions $notify --alarm-actions $notify --unit Percent --insufficient-data-actions $notify
+		 /usr/local/bin/aws --region $region cloudwatch set-alarm-state --alarm-name "$name Disk 95%" --state-value OK --state-reason "Inital alarm creation"
+		 logger -t cloudwatch-setup $name Disk 95% Alarm and notification created.
+
+		 #Enabling cloudwatch alarm actions to happen
+		 echo -e "Enabling alarm actions...\n"
+		 logger -t cloudwatch-setup Enabling Cloudwatch notifiations...
+		 /usr/local/bin/aws --region $region cloudwatch enable-alarm-actions --alarm-names "$name CPU 85%"  "$name CPU 95%" "$name Memory 90%" "$name Memory 95%" "$name Disk 80%" "$name Disk 95%"
+		 logger -t cloudwatch-setup Cloudwatch notifications are now active.
+		 echo -e "Cloudwatch notifications are now active. \n"
+		 echo "Set-cloudwatch script has completed successfully" > /home/blabcake/set-cloudwatch.results
+	;;	
+suspend)
+		# Silence the cloudwatch alarm actions.
+		echo -e "Shushing cloudwatch alerts...\n"
+		logger -t cloudwatch-setup Suspending Cloudwatch Notifcations...
+		/usr/local/bin/aws --region $region cloudwatch disable-alarm-actions --alarm-names "$name CPU 85%"  "$name CPU 95%" "$name Memory 90%" "$name Memory 95%" "$name Disk 80%" "$name Disk 95%"
+		logger -t cloudwatch-setup Cloudwatch notifictions are now suspended
+	;;
+terminate)
+		#Deleting the cloudwatch alarms
+		echo -e "Deleting all cloudwatch alarms for $name...\n"
+		logger -t cloudwatch-setup Deleting Cloudwatch alarms
+		/usr/local/bin/aws --region $region cloudwatch delete-alarms --alarm-names "$name CPU 85%"  "$name CPU 95%" "$name Memory 90%" "$name Memory 95%" "$name Disk 80%" "$name Disk 95%"
+		logger -t cloudwatch-setup Cloudwatch alarms deleted
+	;;
+stop)
+	logger -t cloudwatch-setup Stop command issued. No actions to perform.
+	echo -e "Hammer time. You can't touch this. \n"
+	;;
+
+status)
+	echo "This instance has the current alarms defined in Cloudwatch:"
+	echo "$current_alarms"
+	;;
+esac
