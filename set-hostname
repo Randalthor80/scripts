@@ -1,0 +1,54 @@
+#!/bin/bash
+
+### BEGIN INIT INFO
+# Provides:          set-cloudwatch
+# Required-Start:    $syslog
+# Required-Stop:     $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Run the script
+# Description:       creates, suspends and terminates cloudwatch alarms, depending on arguement provided
+### END INIT INFO
+
+#This script automatically enters the hostname and hosts file values. It pulls the provided information from the EC2 meta data and then uses it to populate the files. 
+
+#Usage: 
+# Copy this script into /etc/init.d and run: update-rc.d set-hostname defaults 99
+USAGE="Usage: set-hostname start - Sets the hostname and hosts file in /etc/| stop - does nothing | restart - does nothing | status - really does nothing"
+#Setting up the variables.
+instance=`wget -q -O - http://169.254.169.254/latest/meta-data/instance-id`
+region=`wget -q -O - http://169.254.169.254/latest/meta-data/placement/availability-zone|sed s'/.$//'`
+name=`/usr/local/bin/aws --region $region ec2 describe-tags --filters "Name=resource-id,Values=$instance" "Name=key,Values=Name"|grep Value|awk '{print $2}'|sed -e 's/,//g'|sed -e 's/"//g'`
+platform=`/usr/local/bin/aws --region $region ec2 describe-tags --filters "Name=resource-id,Values=$instance" "Name=key,Values=environment"|grep Value|awk '{print $2}'|sed -e 's/,//g'|sed -e 's/"//g'`
+
+case $1 in
+	start)
+
+		if [[ "$(cat /etc/hostname)" != $name ]]
+			then
+				echo "Host and Hostname files are incorrect. Setting them now..."
+				logger -t blabcake-hostname-setup -- Setting up system hostname and hosts file.
+				echo "$name" > /etc/hostname 
+				echo "127.0.0.1 $name $name.$platform.blabcake.com" > /etc/hosts
+				echo -e "Host and Hostnames are set:"
+				cat /etc/hosts
+				cat /etc/hostname
+				logger -t blabcake-hostname-setup -- Hostname and hosts files set.
+				logger -t blabcake-hostname-setup -- Hostname and Hosts setup complete.
+			else
+				logger -t blabcake-hostname-setup Hosts and Hostname files already set. Doing nothing.
+				echo "Files are set. To reset the hostname: sudo rm /etc/hostname; sudo rm /etc/hosts"
+			fi
+	;;
+	stop)
+		echo "Nothing to do."
+	;;
+	status)
+		echo "Nothing to do"
+	;;
+	restart)
+		echo "Nothing to do"
+	;;
+esac
+
+		
